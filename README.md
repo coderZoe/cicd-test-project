@@ -1,10 +1,10 @@
 #  	Gitlab CICD
 
-> 本文讲一下如何使用`gitlab`来做CICD：使用`gitlab`做**代码仓库**，同时用Gitlab的CI功能完成**代码扫描**、**编译打包**、**镜像构建**和**镜像中心**，并**使用k8s来做部署**。
+> 本文讲一下如何使用`gitlab`来做CICD：使用`gitlab`做**代码仓库**，同时用`gitlab`的CI功能完成**代码扫描**、**编译打包**、**镜像构建**和**镜像中心**，并**使用k8s来做部署**。
 >
-> 我们的流程是先使用`gitlab`来做完整的流程，一步步的由简到繁，一点点增加功能和优化过程，致力于达到真实企业的CICD效果。优化内容包括但不限于使用`nexus`、`harbor`等搭建私库优化CI的构建效率，使用k8s`namespace`做多环境隔离，并通过`ConfigMap`和`Secret`存储环境变量等。
+> 我们的流程是先使用`gitlab`来做完整的流程，一步步的由简到繁，一点点增加功能和优化过程，致力于达到真实gitlab企业的CICD效果。优化内容包括但不限于使用`nexus`、`harbor`等搭建私库优化CI的构建效率，使用k8s`namespace`做多环境隔离，并通过`ConfigMap`和`Secret`存储环境变量等。
 >
-> 我们整个CICD均采用**GitOps**的**一切皆代码 (Everything as Code)**思想。**Git作为一切的来源**，这代表除了代码本身，CI流水线要代码化、k8s的部署要代码化、k8s环境变量配置也要代码化。
+> 整个CICD均采用**GitOps**的**一切皆代码 (Everything as Code)**思想。**Git作为一切的来源**，这代表除了代码本身，CI流水线要代码化、k8s的部署要代码化、k8s环境变量配置也要代码化。
 >
 > 整个测试将使用四台服务器，服务器操作系统均为Debian12
 >
@@ -13,6 +13,7 @@
 >
 > 项目所用`gitlab`版本为最新的`18.1.1-ce.0`
 >
+> 项目完整代码和配置可见：[coderZoe/cicd-test-project](https://github.com/coderZoe/cicd-test-project)
 
 
 
@@ -280,7 +281,7 @@ users:
 "
 ```
 
-将打印内容copy到`gitlab`：
+将打印内容复制到`gitlab`：
 
 ![image-20250715163155687](https://coderzoework.oss-cn-beijing.aliyuncs.com/image-20250715163155687.png)
 
@@ -442,19 +443,19 @@ deploy-job:
 * `publish-image`(构建镜像)：
     - 使用公司标准化的`Dockerfile`模板构建Docker镜像。该模板将包含多阶段构建（Multi-stage builds）优化，以生成最小化的生产镜像（如使用`Distroless`或`Alpine`作为基础镜像）。
     - 镜像Tag将包含Git Commit SHA和流水线ID，确保唯一性和可追溯性（例如：`myapp:1.2.0-a1b2c3d-12345`）
-    - 构建完成将镜像推送到Harbor镜像仓库的开发或测试命名空间下
+    - 构建完成将镜像推送到镜像仓库
 
 **Stage 4: `deploy-dev` (部署到开发环境)**
 
-* 通过`kubectl` 使用gitlab环境变量里配置的开发环境的k8s api信息，并结合项目的deployment和service等文件实现自动部署到开发环境，方便开发人员的自测验证
+* 通过`kubectl` 使用gitlab环境变量里配置的开发环境的 `KUBE CONFIG`信息，并结合项目的deployment和service等文件实现自动部署到开发环境，方便开发人员的自测验证
 
 **Stage 5: `deploy-relese` (部署到预发布环境)**
 
-* 通过`kubectl` 使用gitlab环境变量里配置的预发布环境的k8s api信息，并结合项目的deployment和service等文件实现自动部署到预发布环境，方便测试人员测试
+* 通过`kubectl` 使用gitlab环境变量里配置的预发布环境的 `KUBE CONFIG`信息，并结合项目的deployment和service等文件实现自动部署到预发布环境，方便测试人员测试
 
 **Stage 6: `deploy-prod` (部署到生产环境)**
 
-* 通过`kubectl` 使用gitlab环境变量里配置的生产环境的k8s api信息，并结合项目的deployment和service等文件实现自动部署到生产环境
+* 通过`kubectl` 使用gitlab环境变量里配置的生产环境的 `KUBE CONFIG`信息，并结合项目的deployment和service等文件实现**手动**部署到生产环境
 
 
 
@@ -636,15 +637,11 @@ default:
     - linux
     - docker
 
-
 variables:
   IMAGE_NAME: $CI_REGISTRY_IMAGE
   IMAGE_TAG: $CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
   MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
 
-# ==============================================================================
-# 缓存模板 (Cache Template)
-# ==============================================================================
 .maven_cache:
   cache:
     key:
@@ -673,9 +670,6 @@ stages:
   - deploy-prod
 
 
-# ==============================================================================
-# STAGE: build - Compiles, runs unit tests, and packages the application.
-# ==============================================================================
 build-and-test:
   stage: build
   extends: .maven_defaults
@@ -690,9 +684,6 @@ build-and-test:
     - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
 
 
-# ==============================================================================
-# STAGE: test-and-analyze - Performs SonarQube quality gate check.
-# ==============================================================================
 code-quality-scan:
   stage: test-and-analyze
   extends: .maven_defaults
@@ -710,15 +701,10 @@ code-quality-scan:
       artifacts: true
   allow_failure: true
   rules:
-    # 向关键分支合并或推送时进行强制的质量门禁检查
     - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "release" || $CI_COMMIT_BRANCH == "master"'
-    # 在合并请求时运行，以便在合并前发现问题
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
 
-# ==============================================================================
-# STAGE: publish - Builds and pushes a Docker image to the registry.
-# ==============================================================================
 publish-image:
   stage: publish
   image: docker:latest
@@ -738,15 +724,12 @@ publish-image:
     - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "release" || $CI_COMMIT_BRANCH == "master"'
 
 
-# ==============================================================================
-# STAGE: deploy-*
-# ==============================================================================
+
 .deploy_template:
   extends: .kubectl_defaults
   script:
     - echo "INFO Deploying image $IMAGE_NAME:$IMAGE_TAG to $CI_ENVIRONMENT_NAME environment..."
     - export KUBECONFIG=$KUBE_CONFIG
-    # Replaces the placeholder with the precise, globally defined image and tag.
     - cat $KUBE_CONFIG
     - sed -i "s|IMAGE_PLACEHOLDER|$IMAGE_NAME:$IMAGE_TAG|g" k8s/deployment.yaml
     - echo "INFO Applying Kubernetes manifests..."
@@ -786,8 +769,6 @@ deploy-prod:
   rules:
     - if: '$CI_COMMIT_BRANCH == "master"'
 ```
-
-
 
 #### 3.2.5 MR测试
 
@@ -829,15 +810,13 @@ MR一旦发起，立马在`source branch(feature/v1)`执行打包和代码扫描
 
 这里特殊的是我们生产环境的部署采用手动模式，因此需要手动确认下。
 
-
-
 ## 4. CI优化
 
 ### 4.1 私有maven仓库
 
 #### 4.1.1 搭建nexus
 
-一般企业开发都会有自己的私有maven仓库，这有非常多好处，其中一个就是我们CICD的时候可以不从maven center拉取依赖，避免网络不通等问题。
+一般企业开发都会有自己的私有maven仓库，这有非常多好处，其中一个就是我们CICD的时候可以不从maven center拉取依赖，避免网络不通、下载过慢等问题。
 
 搭建私服maven仓库一般选用`nexus3`
 
@@ -991,7 +970,6 @@ publish-image:
   script:
     - echo "INFO Deploying image $IMAGE_NAME:$IMAGE_TAG to $CI_ENVIRONMENT_NAME environment..."
     - export KUBECONFIG=$KUBE_CONFIG
-    # Replaces the placeholder with the precise, globally defined image and tag.
     - cat $KUBE_CONFIG
     - sed -i "s|IMAGE_PLACEHOLDER|$IMAGE_NAME:$IMAGE_TAG|g" k8s/deployment.yaml
     - echo "INFO Applying Kubernetes manifests..."
@@ -1036,7 +1014,7 @@ deploy-prod:
 
 ### 4.2 私有镜像仓库
 
-理论上`gitlab`已经内置了镜像仓库(5050端口就是镜像仓库端口)，所以其实我们完全可以直接用gitlab的镜像仓库。但有时候为了解耦或者一些企业化管理需求，如更高的安全权限以及漏洞扫描镜像签名等功能。这种时候就需要用到`harbor`。
+理论上`gitlab`已经内置了镜像仓库(5050端口就是镜像仓库端口)，所以其实我们完全可以直接用`gitlab`的镜像仓库。但有时候为了解耦或者一些企业化管理需求，如更高的安全权限以及漏洞扫描镜像签名等功能。这种时候就需要用到`harbor`。
 
 #### 4.2.1 Harbor安装
 
@@ -1054,11 +1032,11 @@ deploy-prod:
 
 #### 4.2.2 集成进gitlab
 
-将harbor集成进gitlab：`项目或group下 => Setting => integrations => Habor`，集成harbor。
+将`harbor`集成进`gitlab`：`项目或group下 => Setting => integrations => Habor`，集成`harbor`。
 
 ![image-20250730143745620](https://coderzoework.oss-cn-beijing.aliyuncs.com/image-20250730143745620.png)
 
-如果你的harbor地址是内网地址，还需要先授权本地网络访问：`Admin => Settings => Network => Outbound requests`勾选：`Allow requests to the local network from webhooks and integrations`
+如果你的`harbor`地址是内网地址，还需要先授权本地网络访问：`Admin => Settings => Network => Outbound requests`勾选：`Allow requests to the local network from webhooks and integrations`
 
 ![image-20250730142547703](https://coderzoework.oss-cn-beijing.aliyuncs.com/image-20250730142547703.png)
 
@@ -1068,7 +1046,7 @@ deploy-prod:
 
 #### 4.2.3 修改Docker和k8s containerd配置
 
-由于我们的镜像中心换为了harbor不再是gitlab-registry，且harbor部署的时候我未使用https，因此我们需要修改部署gitlab宿主机的docker配置和k8s节点containerd配置：
+由于我们的镜像中心换为了`harbor`不再是`gitlab-registry`，且`harbor`部署的时候我未使用https，因此我们需要修改部署`gitlab`宿主机的docker配置和k8s节点containerd配置：
 
 Docker增加非安全注册中心
 
@@ -1108,6 +1086,7 @@ variables:
 .prepare_image_name: &prepare_image_name
   - export HARBOR_HOST_WITH_PORT=$(echo $HARBOR_URL | sed -E 's|https?://||; s|/+$||')
   - export FULL_IMAGE_NAME="$HARBOR_HOST_WITH_PORT/$HARBOR_PROJECT/$CI_PROJECT_NAME"
+  
 stages:
   - build
   - test-and-analyze
@@ -1240,9 +1219,9 @@ deploy-prod:
 
 #### 4.2.5 镜像代理
 
-既然我们有了harbor，肯定想的是不仅用来存储自己构建的镜像，还想缓存第三方的镜像。比如我们CI的时候用到了`maven:3.9.6-eclipse-temurin-21`，`Dockerfile`用到了`eclipse-temurin:21-jre-alpine`。理论上我们配置了`gitlab-runner`的镜像拉取策略是`pull_policy = "if-not-present"`，宿主机只需要拉取一次镜像存到本地后续无需再拉取。但假设我们清理了宿主机上的镜像或Gitlab从宿主机上做了迁移，亦或别的平台也想用这些镜像，这时候我们本地缓存的镜像就失效了，还得重新拉取。但我们知道国内访问dockrhub等官方镜像源有些困难，因此一个比较好的方案是使用harbor做镜像代理，缓存我们需要的第三方镜像，CI或Dockerfile直接去harbor中拉取这些镜像即可。与nexus类似，如果本地存储的有镜像，直接将镜像返回给请求源，如果本地没有镜像则去代理源去下载。
+既然我们有了`harbor`，肯定想的是不仅用来存储自己构建的镜像，还想缓存第三方的镜像。比如我们CI的时候用到了`maven:3.9.6-eclipse-temurin-21`，`Dockerfile`用到了`eclipse-temurin:21-jre-alpine`。理论上我们配置了`gitlab-runner`的镜像拉取策略是`pull_policy = "if-not-present"`，宿主机只需要拉取一次镜像存到本地后续无需再拉取。但假设我们清理了宿主机上的镜像或Gitlab从宿主机上做了迁移，亦或别的平台也想用这些镜像，这时候我们本地缓存的镜像就失效了，还得重新拉取。但我们知道国内访问dockrhub等官方镜像源有些困难，因此一个比较好的方案是使用harbor做镜像代理，缓存我们需要的第三方镜像，CI或Dockerfile直接去harbor中拉取这些镜像即可。与`nexus`类似，如果本地存储的有镜像，直接将镜像返回给请求源，如果本地没有镜像则去代理源去下载。
 
-首先我们点击`harbor`的`系统管理=> 仓库管理 => 新建目标`，创建一个代理，这里我选择的是（注国内无法访问，需自己在harbor的配置中设置http_proxy和https_proxy）。
+首先我们点击`harbor`的`系统管理=> 仓库管理 => 新建目标`，创建一个代理，这里我选择的是（注国内无法访问，需自己在`harbor`的配置中设置http_proxy和https_proxy）。
 
 ![image-20250730165229971](https://coderzoework.oss-cn-beijing.aliyuncs.com/image-20250730165229971.png)
 
@@ -1499,7 +1478,7 @@ ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
 
 可以看到前两个镜像共享大小`261.5MB`，而我们当前最新的镜像仅额外占用`8.263KB`。
 
-**分层打包带来的收益是非常高的**，一方面可以减少镜像体积，加快镜像的构建，提高镜像分发速率。另一方面分层可以减少我们服务器的磁盘占用。对于长期测试的环境，分层要比不分层磁盘占用至少可以减少90%，这里的服务器包括gitlab CI运行的宿主机、harbor存储空间、运行镜像的k8s节点等。除此以外，如果公司微服务较多，可以在分层打包的基础上提取一些公共依赖层，这些层不仅复用减少磁盘占用，还可以利用COW减少内存的占用。
+**分层打包带来的收益是非常高的**，一方面可以减少镜像体积，加快镜像的构建，提高镜像分发速率。另一方面分层可以减少我们服务器的磁盘使用。对于长期测试的环境，分层要比不分层磁盘占用至少可以减少90%。这里的服务器包括gitlab CI运行的宿主机、harbor存储空间、运行镜像的k8s节点等。除此以外，如果公司微服务较多，可以在分层打包的基础上提取一些公共依赖层，这些层不仅复用减少磁盘占用，还可以利用COW减少内存的占用。
 
 ## 5. CD优化
 
@@ -1665,9 +1644,7 @@ code-quality-scan:
       artifacts: true
   allow_failure: true
   rules:
-    # 在向关键分支合并或推送时进行强制的质量门禁检查
     - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "release" || $CI_COMMIT_BRANCH == "master"'
-    # 在合并请求时运行，以便在合并前发现问题
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
 
@@ -1769,7 +1746,7 @@ deploy-prod:
     - if: '$CI_COMMIT_BRANCH == "master"'
 ```
 
-下面我们需要**重新生成一个k8s凭证**，由于之前生成凭证是不同环境用了不同的凭证，但这种在一个k8s集群多`namespace`下维护会不方便，因此改为生成一个唯一凭证，并为这个凭证授权我们上述`namespace`的权限，这样无论是哪个环境用的都是一个凭证，方便维护。
+下面我们需要**重新生成一个k8s凭证**，由于之前生成凭证是不同环境用了不同的凭证，但这种在一个k8s集群多`namespace`下其实不用那么麻烦，因此改为生成一个唯一凭证，并为这个凭证授权我们上述`namespace`的权限。这样无论是哪个环境用的都是一个凭证，方便维护。
 
 在k8s任一节点下创建脚本`setup-gitlab-k8s-auth.sh`
 
@@ -2002,7 +1979,7 @@ metadata:
   name: cicd-test-project-config
   namespace: prod
 data:
-  JDBC_URL: "jdbc:mysql://192.168.31.166:3306/seed-sync?useUnicode=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&rewriteBatchedStatements=true&serverTimezone=GMT%2B8" 
+  JDBC_URL: "jdbc:mysql://prod-mysql-service:3306/seed-sync?useUnicode=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&rewriteBatchedStatements=true&serverTimezone=GMT%2B8" 
   DATABASE_USERNAME: "root" 
 
 ---
@@ -2018,7 +1995,7 @@ data:
   DATABASE_PASSWORD: "MTIzNDU2"
 ```
 
-然后在环境一开始执行这份文件，让环境的配置里包含我们需要的信息。
+运维人员在环境一开始执行这份文件，让环境的配置里包含我们需要的信息。
 
 我们还需要修改下k8s的deployment，保证从configmap或secret中加载这些环境变量：
 
@@ -2058,6 +2035,19 @@ spec:
 
 
 
+## 6. 总结
+
+我们以一个简单的SpringBoot项目为例，从简到繁，慢慢优化，做到了一套企业级的CICD流程。整个流程如下：
+
+1. 项目采用Gitflow为基本的分支管理策略，feature分支push的时候触发打包和单元测试、feature MR到develop的时候触发打包单元测试和代码扫描，校验通过才允许MR，MR到develop分支后，触发develop分支的打包、单元测试、代码扫描和镜像构建与推送以及自动部署到开发环境，其他分支和环境同理
+2. 集成SonarQube做代码的门禁检测
+3. 使用nexus做私有maven仓库，加快CI的构建
+4. 使用harbor做私有镜像仓库，缓存三方镜像与自己服务的镜像（同时还可以做镜像扫描）
+5. 使用分层打包，适应云原生，减少镜像体积
+6. 在一套k8s上通过`namespace`隔离不同环境
+7. 使用ingress，通过不同路由来访问不同环境服务
+8. 通过k8s的ConfigMap和Secret来作为环境变量，服务使用的外部配置直接从环境变量引入
+
 ## # 附录1：GitOps
 
 上述CICD无论是**CI流水线**、**k8s deployment、service和ingress**还是**环境变量(k8s ConfigMap和Secret)**我们**均采用代码的形式，而非在一些可视化页面勾勾点点，通过UI实现的方式**。且这些信息与代码一样均是被Git管理的，这其实就是现今主流的一种Devops最佳实践：**GitOps**。
@@ -2068,6 +2058,8 @@ spec:
 2. **自动操作，杜绝手动人为失误**： 流程不再依赖人的记忆和手动操作。代码化的配置消除了“点错按钮”、“填错数字”这类低级但后果严重的失误。
 3. **灾难恢复容易**：假设我们的CI工具，如jenkins或gitlab、gitea等发生故障，只能重建，**那页面操作那些行为就得重新手动再操作一遍，还得和故障发生前的手动配置完全一模一样。但现在我们所有配置都写在了代码里，不依赖于任何平台，即使CI数据全部丢失完全重建，也对我们没任何影响**。
 4. **一键重建，轻松复制**：对于不同的环境或不同的项目，我们仅需要修改文件中的几个小配置即可完整对新项目的复制和新环境的重建。
+
+当然更成熟的GitOps还需要配合一些GitOps工具，如Argo CD，但这对运维人员的要求也会更高，我们上面这些方案基本已经完全够用了。
 
 ## #附录2： k8s集群搭建
 
