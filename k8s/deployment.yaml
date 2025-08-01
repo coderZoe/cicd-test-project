@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cicd-test-project-deployment # 部署的名称
+  labels:
+    app: cicd-test-project # 一个标签，用于识别
+spec:
+  replicas: 3 # 我希望运行3个应用的副本，以实现冗余
+  selector:
+    matchLabels:
+      app: cicd-test-project # 选择带有这个标签的Pod进行管理
+  template:
+    metadata:
+      labels:
+        app: cicd-test-project # 为将要创建的Pod也打上这个标签
+    spec:
+      containers:
+        - name: cicd-test-project-container
+          image: IMAGE_PLACEHOLDER # 这是一个至关重要的占位符！
+          ports:
+            - containerPort: 8080 # 您的Spring Boot应用在容器内监听的端口
+          # 从configmap和secret中读取环境变量
+          envFrom:
+            - configMapRef:
+                name: cicd-test-project-config
+            - secretRef:
+                name: cicd-test-project-secret

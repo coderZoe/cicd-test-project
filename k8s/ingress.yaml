@@ -1,0 +1,19 @@
+# k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  # 名称将由CI/CD动态设置
+  name: cicd-test-project-ingress
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: "HOST_PLACEHOLDER" # 主机名占位符
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cicd-test-project-service
+                port:
+                  number: 80

@@ -1,0 +1,173 @@
+# ==============================================================================
+# 全局默认设置 (Global Defaults)
+# ==============================================================================
+default:
+  tags:
+    - linux
+    - docker
+
+variables:
+  IMAGE_TAG: $CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+
+.maven_defaults:
+  image: 192.168.31.193:20080/docker-proxy/maven:3.9.6-eclipse-temurin-21
+
+.kubectl_defaults:
+  image:
+    name: 192.168.31.193:20080/docker-proxy/bitnami/kubectl:latest
+    entrypoint: [""]
+
+.prepare_image_name: &prepare_image_name
+  - export HARBOR_HOST_WITH_PORT=$(echo $HARBOR_URL | sed -E 's|https?://||; s|/+$||')
+  - export FULL_IMAGE_NAME="$HARBOR_HOST_WITH_PORT/$HARBOR_PROJECT/$CI_PROJECT_NAME"
+
+
+stages:
+  - build
+  - test-and-analyze
+  - publish
+  - deploy-dev
+  - deploy-release
+  - deploy-prod
+
+# ==============================================================================
+# STAGE: build - Compiles, runs unit tests, and packages the application.
+# ==============================================================================
+build-and-test:
+  stage: build
+  extends: .maven_defaults
+  script:
+    - echo "INFO [Stage build] Compiling, running unit tests, and packaging..."
+    - mvn -s .mvn/settings.xml verify
+  artifacts:
+    paths:
+      - target/
+    expire_in: 1 hour
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+
+
+# ==============================================================================
+# STAGE: test-and-analyze - Performs SonarQube quality gate check.
+# ==============================================================================
+code-quality-scan:
+  stage: test-and-analyze
+  extends: .maven_defaults
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - echo "INFO [Stage test-and-analyze] Running SonarQube analysis via automatic integration..."
+    - >-
+      mvn -s .mvn/settings.xml verify sonar:sonar
+      -Dsonar.projectKey=test-group_cicd-test-project_AZgXyvpJjZI_rh9cYAvb
+      -Dsonar.qualitygate.wait=true
+      -Dsonar.qualitygate.timeout=300
+  needs:
+    - job: build-and-test
+      artifacts: true
+  allow_failure: true
+  rules:
+    # 在向关键分支合并或推送时进行强制的质量门禁检查
+    - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "release" || $CI_COMMIT_BRANCH == "master"'
+    # 在合并请求时运行，以便在合并前发现问题
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+#    # 在所有推送和合并请求时都运行
+#    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+
+
+# ==============================================================================
+# STAGE: publish - Builds and pushes a Docker image to the registry.
+# ==============================================================================
+publish-image:
+  stage: publish
+  image: 192.168.31.193:20080/docker-proxy/docker:latest
+  before_script:
+    - *prepare_image_name # 引用锚点
+  script:
+    - echo "INFO [Stage publish] Logging into Harbor $HARBOR_URL"
+    - echo "$HARBOR_PASSWORD" | docker login -u "$HARBOR_USERNAME" --password-stdin $HARBOR_URL
+    - echo "INFO Building Docker image with name $FULL_IMAGE_NAME:$IMAGE_TAG"
+    - docker build -t "$FULL_IMAGE_NAME:$IMAGE_TAG" .
+    - echo "INFO Pushing Docker image $FULL_IMAGE_NAME:$IMAGE_TAG to Harbor"
+    - docker push "$FULL_IMAGE_NAME:$IMAGE_TAG"
+  needs:
+    - job: code-quality-scan
+      artifacts: false
+    - job: build-and-test
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "release" || $CI_COMMIT_BRANCH == "master"'
+
+
+# ==============================================================================
+# STAGE: deploy-*
+# ==============================================================================
+.deploy_template:
+  extends: .kubectl_defaults
+  variables:
+    # 预定义变量，由具体的deploy-job来覆盖
+    K8S_NAMESPACE: ""
+    APP_HOST: ""
+  before_script:
+    - *prepare_image_name
+    - if [ -z "$K8S_NAMESPACE" ]; then echo "Error=> K8S_NAMESPACE is not set."; exit 1; fi
+    - if [ -z "$APP_HOST" ]; then echo "Error=> APP_HOST is not set."; exit 1; fi
+  script:
+    - echo "INFO Deploying image $FULL_IMAGE_NAME:$IMAGE_TAG to namespace '$K8S_NAMESPACE' with host '$APP_HOST'..."
+    - export KUBECONFIG=$KUBE_CONFIG
+    # --- 动态修改YAML文件 ---
+    - sed -i "s|IMAGE_PLACEHOLDER|$FULL_IMAGE_NAME:$IMAGE_TAG|g" k8s/deployment.yaml
+    - sed -i "s|HOST_PLACEHOLDER|$APP_HOST|g" k8s/ingress.yaml
+
+    # 执行k8s到具体的namespace
+    - echo "INFO Applying Kubernetes manifests..."
+    - kubectl create namespace $K8S_NAMESPACE || true
+    - kubectl apply -f k8s/deployment.yaml --namespace $K8S_NAMESPACE
+    - kubectl apply -f k8s/service.yaml --namespace $K8S_NAMESPACE
+    - kubectl apply -f k8s/ingress.yaml --namespace $K8S_NAMESPACE
+    # 监控结果
+    - echo "INFO Waiting for deployment rollout to complete..."
+    - kubectl rollout status deployment/cicd-test-project-deployment --namespace $K8S_NAMESPACE --timeout=120s
+  needs:
+    - publish-image
+
+deploy-dev:
+  stage: deploy-dev
+  extends: .deploy_template
+  variables:
+    # 【新增】为开发环境注入特定的命名空间和域名
+    K8S_NAMESPACE: develop
+    APP_HOST: dev.cicd-test.com
+  environment:
+    name: develop
+    url: http://dev.cicd-test.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+deploy-release:
+  stage: deploy-release
+  extends: .deploy_template
+  variables:
+    # 【新增】为预发布环境注入特定的命名空间和域名
+    K8S_NAMESPACE: release
+    APP_HOST: release.cicd-test.com
+  environment:
+    name: release
+    url: http://release.cicd-test.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "release"'
+
+deploy-prod:
+  stage: deploy-prod
+  extends: .deploy_template
+  variables:
+    # 【新增】为生产环境注入特定的命名空间和域名
+    K8S_NAMESPACE: prod
+    APP_HOST: cicd-test.com
+  environment:
+    name: prod
+    url: http://cicd-test.com
+  when: manual
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
